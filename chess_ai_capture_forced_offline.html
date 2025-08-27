@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Offline Chess — Aggressive Capture-aware AI</title>
+<style>
+  body{font-family:system-ui,Arial;margin:0;background:#0b1022;color:#e5e7eb;display:flex;align-items:center;justify-content:center;min-height:100vh;}
+  .wrap{width:100%;max-width:1100px;padding:20px;display:flex;gap:20px;}
+  .card{background:rgba(17,24,39,0.95);padding:16px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.5);}
+  #board{width:560px;height:560px;display:grid;grid-template-columns:repeat(8,1fr);border-radius:8px;overflow:hidden;}
+  .sq{display:grid;place-items:center;font-size:48px;user-select:none;cursor:pointer;}
+  .light{background:#eeeedd;color:#222;}
+  .dark{background:#769656;color:#fff;}
+  .tag{padding:6px 10px;border-radius:999px;background:linear-gradient(90deg,#a78bfa,#60a5fa);color:#071124;font-weight:700}
+  .row{display:flex;gap:10px;align-items:center;}
+  button{padding:8px 12px;border-radius:8px;border:none;cursor:pointer;font-weight:700}
+  .btn-danger{background:#ef4444;color:white}
+  ol{max-height:360px;overflow:auto;padding-left:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><h2 style="margin:0">You (White) vs Aggressive AI (Black)</h2><div style="color:#94a3b8">Forced safe captures + quiescence</div></div>
+      <div class="tag" id="turnTag">White to move</div>
+    </div>
+    <div id="board"></div>
+    <div class="row" style="margin-top:12px;">
+      <button id="newBtn" class="btn-danger">New Game</button>
+      <div style="flex:1"></div>
+      <div style="color:#94a3b8">No Help · No Undo</div>
+    </div>
+  </div>
+
+  <div class="card" style="width:320px">
+    <h3 style="margin-top:0">Score & Moves</h3>
+    <div style="display:flex;justify-content:space-between;"><div>White Points</div><div id="whitePoints" style="font-weight:800">0</div></div>
+    <div style="display:flex;justify-content:space-between;"><div>Black Points</div><div id="blackPoints" style="font-weight:800">0</div></div>
+    <hr style="border:none;border-top:1px solid rgba(148,163,184,.08);margin:12px 0">
+    <h4 style="margin:0 0 8px 0">Move list</h4>
+    <ol id="moveList"></ol>
+    <div style="margin-top:8px;color:#94a3b8;font-size:13px">
+      Scoring: every legal move gives the <strong>opponent</strong> +1 point. Captures add captured value (P=1,N=3,B=3,R=5,Q=9). Checks add +0.5.
+    </div>
+  </div>
+</div>
+
+<script>
+/* Aggressive offline AI that prioritizes safe captures.
+   Still omits castling/en-passant for compactness.
+*/
+
+const GLYPH = { wK:'♔',wQ:'♕',wR:'♖',wB:'♗',wN:'♘',wP:'♙', bK:'♚',bQ:'♛',bR:'♜',bB:'♝',bN:'♞',bP:'♟' };
+const PIECE_VALUE = { P:1, N:3, B:3, R:5, Q:9, K:0 };
+
+function startPosition(){
+  return [
+    ['bR','bN','bB','bQ','bK','bB','bN','bR'],
+    ['bP','bP','bP','bP','bP','bP','bP','bP'],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    ['wP','wP','wP','wP','wP','wP','wP','wP'],
+    ['wR','wN','wB','wQ','wK','wB','wN','wR']
+  ];
+}
+
+let board = startPosition();
+let turn = 'w';
+let selected = null;
+let whitePoints = 0, blackPoints = 0;
+const moveListEl = document.getElementById('moveList');
+const whitePointsEl = document.getElementById('whitePoints');
+const blackPointsEl = document.getElementById('blackPoints');
+const turnTag = document.getElementById('turnTag');
+
+/* Utilities */
+function inBounds(r,c){ return r>=0 && r<8 && c>=0 && c<8; }
+function cloneBoard(B){ return B.map(row => row.slice()); }
+function sideOf(p){ return p ? p[0] : null; }
+function typeOf(p){ return p ? p[1] : null; }
+function squareName(r,c){ return 'abcdefgh'[c] + (8-r); }
+
+/* Generate pseudo-legal moves */
+function genMoves(B, side){
+  const moves = [];
+  for (let r=0;r<8;r++) for (let c=0;c<8;c++){
+    const p = B[r][c];
+    if (!p || sideOf(p)!==side) continue;
+    const t = typeOf(p);
+    const add = (r2,c2) => { if(!inBounds(r2,c2)) return; const dest=B[r2][c2]; if(!dest || sideOf(dest)!==side) moves.push({from:[r,c],to:[r2,c2],piece:p,captured:dest||null}); };
+    if (t==='P'){
+      const dir = side==='w' ? -1 : 1;
+      const startRow = side==='w' ? 6 : 1;
+      if (inBounds(r+dir,c) && !B[r+dir][c]) add(r+dir,c);
+      if (r===startRow && inBounds(r+2*dir,c) && !B[r+dir][c] && !B[r+2*dir][c]) add(r+2*dir,c);
+      for (const dc of [-1,1]){ const rr=r+dir, cc=c+dc; if(inBounds(rr,cc) && B[rr][cc] && sideOf(B[rr][cc])!==side) add(rr,cc); }
+    } else if (t==='N'){
+      [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]].forEach(([dr,dc])=>add(r+dr,c+dc));
+    } else if (t==='B'||t==='R'||t==='Q'){
+      const rays=[]; if (t==='B'||t==='Q') rays.push([-1,-1],[-1,1],[1,-1],[1,1]); if (t==='R'||t==='Q') rays.push([-1,0],[1,0],[0,-1],[0,1]);
+      for (const [dr,dc] of rays){ let r2=r+dr,c2=c+dc; while(inBounds(r2,c2)){ if(!B[r2][c2]) add(r2,c2); else { add(r2,c2); break; } r2+=dr; c2+=dc; } }
+    } else if (t==='K'){
+      for (let dr=-1; dr<=1; dr++) for (let dc=-1; dc<=1; dc++){ if(dr===0&&dc===0) continue; add(r+dr,c+dc); }
+    }
+  }
+  return moves;
+}
+
+/* King in check and legal moves */
+function kingInCheck(B, side){
+  let kr=-1,kc=-1;
+  for (let r=0;r<8;r++) for (let c=0;c<8;c++) if (B[r][c]===side+'K'){kr=r;kc=c;}
+  if (kr<0) return false;
+  const opp = side==='w' ? 'b' : 'w';
+  const oppMoves = genMoves(B, opp);
+  return oppMoves.some(m => m.to[0]===kr && m.to[1]===kc);
+}
+function legalMoves(B, side){
+  const moves = genMoves(B, side);
+  const legal = [];
+  for (const m of moves){ const B2=applyMove(B,m); if(!kingInCheck(B2,side)) legal.push(m); }
+  return legal;
+}
+
+/* apply move */
+function applyMove(B,mv){
+  const nb = cloneBoard(B);
+  const [r1,c1]=mv.from, [r2,c2]=mv.to;
+  let piece = nb[r1][c1]; nb[r1][c1]=null;
+  if (typeOf(piece)==='P' && (r2===0||r2===7)) piece = sideOf(piece)+'Q';
+  nb[r2][c2]=piece;
+  return nb;
+}
+
+/* evaluate with capture bias and king safety */
+function evaluate(B){
+  let sc=0;
+  for (let r=0;r<8;r++) for (let c=0;c<8;c++){ const p=B[r][c]; if(!p) continue; sc += (sideOf(p)==='w'? PIECE_VALUE[typeOf(p)]: -PIECE_VALUE[typeOf(p)]); }
+  sc += 0.01*legalMoves(B,'w').length - 0.01*legalMoves(B,'b').length;
+  return sc;
+}
+
+/* net capture gain approx */
+function netCaptureGain(B,mv){
+  const gain = mv.captured ? PIECE_VALUE[typeOf(mv.captured)] : 0;
+  const B2 = applyMove(B,mv);
+  const opp = sideOf(mv.piece)==='w' ? 'b' : 'w';
+  const oppCaps = genMoves(B2, opp).filter(m=> m.to[0]===mv.to[0] && m.to[1]===mv.to[1]);
+  if (oppCaps.length===0) return gain;
+  let worstLoss = 0;
+  for (const om of oppCaps) worstLoss = Math.max(worstLoss, PIECE_VALUE[typeOf(om.piece)]);
+  return gain - worstLoss;
+}
+
+/* quiescence */
+function quiescence(B, side, alpha, beta, depthLeft){
+  let stand = evaluate(B);
+  if (stand >= beta) return beta;
+  if (alpha < stand) alpha = stand;
+  if (depthLeft<=0) return stand;
+  const caps = legalMoves(B, side).filter(m=> m.captured).sort((a,b)=> PIECE_VALUE[typeOf(b.captured)]-PIECE_VALUE[typeOf(a.captured)]);
+  for (const mv of caps){
+    const B2 = applyMove(B,mv);
+    const score = -quiescence(B2, side==='w'?'b':'w', -beta, -alpha, depthLeft-1);
+    if (score >= beta) return beta;
+    if (score > alpha) alpha = score;
+  }
+  return alpha;
+}
+
+/* minimax with capture bias and safety */
+function minimax(B, side, depth, alpha, beta, maximizingSide){
+  if (depth===0) return { score: quiescence(B, side, alpha, beta, 8), move: null };
+  const moves = legalMoves(B, side);
+  if (moves.length===0){
+    const inChk = kingInCheck(B, side);
+    return { score: inChk ? (side===maximizingSide ? -9999 : 9999) : 0, move: null };
+  }
+  // order: captures first (by captured value)
+  moves.sort((a,b)=> (a.captured?PIECE_VALUE[typeOf(a.captured)]:0) - (b.captured?PIECE_VALUE[typeOf(b.captured)]:0) );
+  let best=null;
+  if (side===maximizingSide){
+    let maxEval=-Infinity;
+    for (const mv of moves){
+      if (mv.captured){
+        const net = netCaptureGain(B,mv);
+        // if capture is very bad, skip
+        if (net < -2) continue;
+      }
+      const B2=applyMove(B,mv);
+      const res=minimax(B2, side==='w'?'b':'w', depth-1, alpha, beta, maximizingSide);
+      let sc = res.score + (mv.captured? 0.6*PIECE_VALUE[typeOf(mv.captured)] : 0);
+      if (sc > maxEval){ maxEval=sc; best=mv; }
+      alpha = Math.max(alpha, sc);
+      if (beta <= alpha) break;
+    }
+    return { score: maxEval, move: best };
+  } else {
+    let minEval=Infinity;
+    for (const mv of moves){
+      if (mv.captured){
+        const net = netCaptureGain(B,mv);
+        if (net < -2) continue;
+      }
+      const B2=applyMove(B,mv);
+      const res=minimax(B2, side==='w'?'b':'w', depth-1, alpha, beta, maximizingSide);
+      let sc = res.score - (mv.captured? 0.6*PIECE_VALUE[typeOf(mv.captured)] : 0);
+      if (sc < minEval){ minEval=sc; best=mv; }
+      beta = Math.min(beta, sc);
+      if (beta <= alpha) break;
+    }
+    return { score: minEval, move: best };
+  }
+}
+
+/* forced safe-capture selector */
+function forcedSafeCapture(B, side){
+  const moves = legalMoves(B, side).filter(m => m.captured);
+  if (moves.length===0) return null;
+  // compute net capture gain; prefer highest positive net; ensure capture is not losing valuable piece
+  let best=null, bestNet=-Infinity;
+  for (const mv of moves){
+    const net = netCaptureGain(B,mv);
+    if (net > bestNet){
+      bestNet = net; best = mv;
+    }
+  }
+  // if bestNet is positive (or zero but capturing highest value), take it
+  if (best && bestNet >= 0){
+    return best;
+  }
+  return null;
+}
+
+/* move SAN, apply, score */
+function moveToSAN(mv){
+  const from=squareName(mv.from[0],mv.from[1]), to=squareName(mv.to[0],mv.to[1]);
+  const cap = mv.captured? 'x' : '';
+  const p = typeOf(mv.piece); const name = p==='P' ? '' : p;
+  const promo = (p==='P' && (mv.to[0]===0||mv.to[0]===7)) ? '=Q' : '';
+  return `${name}${from}${cap}${to}${promo}`;
+}
+
+function applyAndRecord(mv){
+  const san = moveToSAN(mv);
+  board = applyMove(board, mv);
+  let pts=1;
+  if (mv.captured) pts += (PIECE_VALUE[typeOf(mv.captured)]||0);
+  if (kingInCheck(board, mv.piece[0]==='w'?'b':'w')) pts += 0.5;
+  if (mv.piece[0]==='w') blackPoints += pts; else whitePoints += pts;
+  updateScoreUI();
+  addMoveSAN(san);
+  turn = (turn==='w'?'b':'w');
+  render();
+}
+
+/* AI: forced safe capture first, else minimax depth 3 */
+async function aiMove(){
+  if (turn !== 'b') return;
+  // forced capture check
+  const capture = forcedSafeCapture(board, 'b');
+  if (capture){
+    // play immediately (but wait a tiny bit for UX)
+    await new Promise(r=>setTimeout(r, 250));
+    applyAndRecord(capture);
+    return;
+  }
+  // otherwise minimax
+  const t0 = performance.now();
+  const res = minimax(board, 'b', 3, -Infinity, Infinity, 'b');
+  let mv = res.move;
+  if (!mv){
+    render(); return;
+  }
+  // if chosen move is a capture but net is bad, try best non-capture alternative
+  if (mv.captured && netCaptureGain(board, mv) < -2){
+    const alt = legalMoves(board,'b').filter(m=> !m.captured);
+    if (alt.length>0){
+      let bestAlt=null, bestScore=-Infinity;
+      for (const a of alt){
+        const sc = minimax(applyMove(board,a),'w',2,-Infinity,Infinity,'b').score;
+        if (sc>bestScore){ bestScore=sc; bestAlt=a; }
+      }
+      if (bestAlt) mv = bestAlt;
+    }
+  }
+  const elapsed = performance.now() - t0;
+  const wait = Math.max(350, Math.min(1200, elapsed*0.35));
+  await new Promise(r=>setTimeout(r, wait));
+  applyAndRecord(mv);
+}
+
+/* UI and interaction */
+const boardEl = document.getElementById('board');
+function render(){
+  boardEl.innerHTML='';
+  for (let r=0;r<8;r++){
+    for (let c=0;c<8;c++){
+      const sq=document.createElement('div');
+      sq.className='sq '+((r+c)%2===0?'light':'dark');
+      sq.dataset.r=r; sq.dataset.c=c;
+      const p = board[r][c];
+      if (p){ const span=document.createElement('div'); span.textContent = GLYPH[p[0]+p[1]]; span.style.pointerEvents='none'; sq.appendChild(span); }
+      sq.addEventListener('click', onSquareClick);
+      boardEl.appendChild(sq);
+    }
+  }
+  document.getElementById('turnTag').textContent = turn==='w' ? 'White to move' : 'Black to move';
+  checkGameOver();
+}
+
+function onSquareClick(e){
+  if (turn !== 'w') return;
+  const r=parseInt(e.currentTarget.dataset.r,10), c=parseInt(e.currentTarget.dataset.c,10);
+  const p = board[r][c];
+  if (selected){
+    const legal = legalMoves(board,'w');
+    const found = legal.find(m=> m.from[0]===selected[0] && m.from[1]===selected[1] && m.to[0]===r && m.to[1]===c);
+    if (found){
+      applyAndRecord(found);
+      setTimeout(()=>{ if (!isGameOver()) aiMove(); }, 60);
+    }
+    selected=null; render();
+  } else {
+    if (p && sideOf(p)==='w'){ selected=[r,c]; highlightTargets(r,c); }
+  }
+}
+
+function highlightTargets(r,c){
+  render();
+  const moves = legalMoves(board,'w').filter(m=> m.from[0]===r && m.from[1]===c);
+  for (const mv of moves){ const idx=mv.to[0]*8+mv.to[1]; const el=boardEl.children[idx]; if(el) el.style.boxShadow='inset 0 0 0 6px rgba(96,165,250,0.6)'; }
+  const selIdx=r*8+c; const selEl=boardEl.children[selIdx]; if(selEl) selEl.style.outline='3px solid rgba(34,197,94,0.9)';
+}
+
+function addMoveSAN(san){ const li=document.createElement('li'); li.textContent=san; moveListEl.appendChild(li); moveListEl.scrollTop=moveListEl.scrollHeight; }
+function updateScoreUI(){ whitePointsEl.textContent = Math.round(whitePoints*10)/10; blackPointsEl.textContent = Math.round(blackPoints*10)/10; }
+
+function isGameOver(){ const lw=legalMoves(board,'w').length, lb=legalMoves(board,'b').length; return (lw===0 && turn==='w') || (lb===0 && turn==='b'); }
+function checkGameOver(){ const legal = legalMoves(board,turn).length; if (legal===0){ if (kingInCheck(board,turn)) alert('Checkmate — ' + (turn==='w' ? 'Black' : 'White') + ' wins'); else alert('Stalemate — draw'); } }
+
+document.getElementById('newBtn').addEventListener('click', ()=>{ board=startPosition(); turn='w'; selected=null; moveListEl.innerHTML=''; whitePoints=0; blackPoints=0; updateScoreUI(); render(); });
+
+/* init */
+updateScoreUI();
+render();
+
+</script>
+</body>
+</html>
